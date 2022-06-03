@@ -284,7 +284,7 @@ if __name__ == '__main__':
     ema_recall_interval = num_steps // 1000
     lr = 0.01
     env_name = 'CartPole-v1' #'Acrobot-v1'
-    num_experiments = 50 * 0 + 1
+    num_experiments = 50
     filter_n = 10
     capacity = 1
 
