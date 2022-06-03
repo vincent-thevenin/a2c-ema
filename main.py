@@ -1,4 +1,3 @@
-from copyreg import pickle
 import gym
 import matplotlib.pyplot as plt
 import multiprocessing as mp
@@ -101,13 +100,13 @@ def sim_ema(
                 # Simulate one step
                 a_env = actor_ema(s_env)
                 a_dist = OneHotCategorical(logits=a_env)
-                a_sample = a_dist.sample()
+                a_env_sample = a_dist.sample()
 
-                s_env_new, r_env, done_env, _ = env.step(a_sample.argmax().item())
+                s_env_new, r_env, done_env, _ = env.step(a_env_sample.argmax().item())
                 s_env_new = torch.tensor(s_env_new, dtype=torch.float32).unsqueeze(0)
                 s_env_new = norms(s_env_new)
 
-                replay.push((s_env, a_env, r_env, s_env_new, done_env))
+                replay.push((s_env, a_env_sample, r_env, s_env_new, done_env))
 
                 s_env = s_env_new
                 if done_env:
@@ -117,10 +116,10 @@ def sim_ema(
 
                 steps += 1
 
-                # Get replay queue values
-                a = actor_ema(s)
-                a_dist = OneHotCategorical(logits=a)
-                a_sample = a_dist.sample()
+                # # Get replay queue values
+                # a = actor_ema(s)
+                # a_dist = OneHotCategorical(logits=a)
+                # a_sample = a_dist.sample()
 
                 # update critic
                 target = r + gamma * q_ema( # TODO TEST q_ema here? like q target?
@@ -128,7 +127,7 @@ def sim_ema(
                     argmax_logits2onehot(actor_ema(s_new))
                 ) * (1 - done)
             loss_q = torch.nn.functional.mse_loss(
-                q(s, a_sample),
+                q(s, a),
                 target
             )
             loss_q.backward()
@@ -276,7 +275,7 @@ def sim(
 
 
 if __name__ == '__main__':
-    batch_size = 1
+    batch_size = 64
     gamma = 0.95
     eps_ema = 0.99 # EMA: param * (1-eps) + ema_param * eps
     num_steps = 100_000
@@ -286,7 +285,7 @@ if __name__ == '__main__':
     env_name = 'CartPole-v1' #'Acrobot-v1'
     num_experiments = 50
     filter_n = 10
-    capacity = 1
+    capacity = 1_000
 
     print(
         f'batch_size: {batch_size}, gamma: {gamma}, eps_ema: {eps_ema}, num_steps: {num_steps}, eval_interval: {eval_interval}, ema_recall_interval: {ema_recall_interval}, lr: {lr}, env_name: {env_name}, num_experiments: {num_experiments}, filter_n: {filter_n}, capacity: {capacity}'
