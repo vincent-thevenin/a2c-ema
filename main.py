@@ -69,11 +69,18 @@ def sim_ema(
         s = norms(s)
         for i in range(batch_size * 2):
             a = actor(s)
-            a = OneHotCategorical(logits=a).sample()
-            s_new, r, done, _ = env.step(a.argmax().item())
+            a_sample = OneHotCategorical(logits=a).sample()
+            s_new, r, done, _ = env.step(a_sample.argmax().item())
             s_new = torch.tensor(s_new, dtype=torch.float32).unsqueeze(0)
             s_new = norms(s_new)
-            replay.push((s, a, r, s_new, done))
+            target = r + gamma * q_ema(s_new, argmax_logits2onehot(actor_ema(s_new))) * (1 - done)
+            value = q(s, a_sample)
+            error = torch.nn.functional.mse_loss(
+                target,
+                value,
+            )
+            replay.push((s, a_sample, r, s_new, done), error.item())
+            s = s_new
             s = s_new
             if done:
                 s = env.reset()
@@ -85,6 +92,7 @@ def sim_ema(
         shuffle=True,
         num_workers=0,
         pin_memory=False,
+        drop_last=True
     )
 
     s_env = env.reset()
@@ -95,7 +103,7 @@ def sim_ema(
     steps = 0
     # for i in pbar:
     while steps < num_steps:
-        for s, a, r, s_new, done in dl:
+        for s, a, r, s_new, done, idx in dl:
             with torch.no_grad():
                 # Simulate one step
                 a_env = actor_ema(s_env)
@@ -105,16 +113,6 @@ def sim_ema(
                 s_env_new, r_env, done_env, _ = env.step(a_env_sample.argmax().item())
                 s_env_new = torch.tensor(s_env_new, dtype=torch.float32).unsqueeze(0)
                 s_env_new = norms(s_env_new)
-
-                replay.push((s_env, a_env_sample, r_env, s_env_new, done_env))
-
-                s_env = s_env_new
-                if done_env:
-                    s_env = env.reset()
-                    s_env = torch.tensor(s_env, dtype=torch.float32).unsqueeze(0)
-                    s_env = norms(s_env)
-
-                steps += 1
 
                 # # Get replay queue values
                 # a = actor_ema(s)
@@ -126,13 +124,20 @@ def sim_ema(
                     s_new,
                     argmax_logits2onehot(actor_ema(s_new))
                 ) * (1 - done)
-            loss_q = torch.nn.functional.mse_loss(
-                q(s, a),
-                target
-            )
-            loss_q.backward()
+            loss_q = 1/2 * (target - q(s, a)) ** 2
+            loss_q.mean().backward()
             optim_q.step()
             optim_q.zero_grad()
+
+            # update replay
+            replay.update_priorities(idx, loss_q)
+            replay.push((s_env, a_env_sample, r_env, s_env_new, done_env), 1)
+            s_env = s_env_new
+            if done_env:
+                s_env = env.reset()
+                s_env = torch.tensor(s_env, dtype=torch.float32).unsqueeze(0)
+                s_env = norms(s_env)
+            steps += 1
 
             # update critic_ema with exponential moving average
             for param, ema_param in zip(q.parameters(), q_ema.parameters()):
@@ -143,7 +148,6 @@ def sim_ema(
             a_dist = OneHotCategorical(logits=a)
             a_sample = a_dist.sample()
             a_prob = torch.nn.functional.softmax(a, dim=-1)
-            # loss_actor = -q_ema(s, a_sample + a_prob - a_prob.detach()).mean()
             loss_actor = -q_ema(s, a_sample + a_prob - a_prob.detach()).mean()
             # loss_actor = -(a_dist.log_prob(a_sample) * (target - q_ema(s, a_sample).detach())).mean()
             # loss_actor -= max(0.001, 10 * (num_steps - i*2) / num_steps) * a_dist.entropy().mean()
