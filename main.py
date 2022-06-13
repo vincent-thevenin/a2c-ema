@@ -151,8 +151,8 @@ def sim_ema(
             a_prob = torch.nn.functional.softmax(a, dim=-1)
             loss_actor = -q_ema(s, a_sample + a_prob - a_prob.detach()).mean()
             # loss_actor = -(a_dist.log_prob(a_sample) * (target - q_ema(s, a_sample).detach())).mean()
-            # loss_actor -= max(0.001, 10 * (num_steps - steps*2) / num_steps) * a_dist.entropy().mean()
-            loss_actor.backward()
+            loss_actor_entropy = -max(0.001, 1 * (num_steps - steps*2) / num_steps) * a_dist.entropy().mean()
+            (loss_actor + loss_actor_entropy).backward()
             optim_actor.step()
             optim_actor.zero_grad()
             optim_q.zero_grad()
@@ -184,7 +184,12 @@ def sim_ema(
                         cum_r_eval += r_eval
                         s_eval = s_eval_new
 
-                    pbar.set_postfix(cum_r_eval=cum_r_eval)
+                    pbar.set_postfix(
+                        cum_r_eval=cum_r_eval,
+                        loss_q=loss_q.mean().item(),
+                        loss_actor=loss_actor.item(),
+                        loss_actor_entropy=loss_actor_entropy.item(),
+                    )
                     cum_r_eval_list_ema.append(cum_r_eval)
             
             pbar.update(1)
