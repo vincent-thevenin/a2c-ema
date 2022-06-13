@@ -67,8 +67,8 @@ def sim_ema(
         s = env.reset()
         s = torch.tensor(s, dtype=torch.float32).unsqueeze(0)
         s = norms(s)
-        for i in range(batch_size * 2):
-            a = actor(s)
+        a = actor(s) * 0
+        for i in range(max(1, int(0.1 * capacity))):
             a_sample = OneHotCategorical(logits=a).sample()
             s_new, r, done, _ = env.step(a_sample.argmax().item())
             s_new = torch.tensor(s_new, dtype=torch.float32).unsqueeze(0)
