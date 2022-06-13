@@ -6,6 +6,7 @@ import os
 import pickle
 from scipy.ndimage import uniform_filter1d
 from datetime import datetime
+import stable_baselines3 as sb
 import torch
 from torch.distributions.one_hot_categorical import OneHotCategorical
 from torch.utils import tensorboard
@@ -284,6 +285,196 @@ def sim(
     return cum_r_eval_list
 
 
+def sim_ppo(
+    gamma: float,
+    num_steps: int,
+    eval_interval: int,
+    ema_recall_interval: int,
+    lr: float,
+    env_name: str,
+):
+    # env = gym.make(env_name)
+
+    # model = sb.PPO(
+    #     "MlpPolicy",
+    #     env,
+    #     verbose=1
+    # )
+    # model.learn(total_timesteps=num_steps)
+
+    # # eval
+    # cum_r_eval = 0
+    # obs = env.reset()
+    # for i in range(1000):
+    #     action, _states = model.predict(obs, deterministic=True)
+    #     obs, reward, done, info = env.step(action)
+    #     cum_r_eval += reward
+    #     if done:
+    #         obs = env.reset()
+    #         print(cum_r_eval)
+    #         cum_r_eval = 0
+
+    # env.close()
+
+    env = gym.make(env_name)
+    env_eval = gym.make(env_name)
+    norms = Norms(env_name)
+
+    actor = Actor(env.action_space.n, env.observation_space.shape[0])
+    actor_ema = Actor(env.action_space.n, env.observation_space.shape[0])
+    with torch.no_grad():
+        actor_ema.load_state_dict(actor.state_dict())
+    q = Q(env.action_space.n, env.observation_space.shape[0])
+    q_ema = Q(env.action_space.n, env.observation_space.shape[0])
+    with torch.no_grad():
+        q_ema.load_state_dict(q.state_dict())
+
+    optim_actor = torch.optim.SGD(actor.parameters(), lr=lr)
+    optim_q = torch.optim.SGD(q.parameters(), lr=lr)
+    optim_q_ema = torch.optim.SGD(q_ema.parameters(), lr=lr)
+
+    replay = ReplayQueue(
+        capacity,
+        use_prioritized_replay,
+    )
+    # preheat data
+    with torch.no_grad():
+        s = env.reset()
+        s = torch.tensor(s, dtype=torch.float32).unsqueeze(0)
+        s = norms(s)
+        a = actor(s) * 0
+        for i in range(max(1, int(0.1 * capacity))):
+            a_sample = OneHotCategorical(logits=a).sample()
+            s_new, r, done, _ = env.step(a_sample.argmax().item())
+            s_new = torch.tensor(s_new, dtype=torch.float32).unsqueeze(0)
+            s_new = norms(s_new)
+            target = r + gamma * q_ema(s_new, argmax_logits2onehot(actor_ema(s_new))) * (1 - done)
+            value = q(s, a_sample)
+            error = torch.nn.functional.mse_loss(
+                target,
+                value,
+            )
+            replay.push((s, a_sample, r, s_new, done), error.item())
+            s = s_new
+            s = s_new
+            if done:
+                s = env.reset()
+                s = torch.tensor(s, dtype=torch.float32).unsqueeze(0)
+                s = norms(s)
+    ds = ModelDataset(replay)
+    dl = torch.utils.data.DataLoader(
+        ds,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=0,
+        pin_memory=False,
+        drop_last=False
+    )
+
+    s_env = env.reset()
+    s_env = torch.tensor(s_env, dtype=torch.float32).unsqueeze(0)
+    s_env = norms(s_env)
+    pbar = tqdm(range(int(num_steps)))
+    cum_r_eval_list_ema = []
+    steps = 0
+    # for i in pbar:
+    while steps < num_steps:
+        for s, a, r, s_new, done, idx in dl:
+            with torch.no_grad():
+                # Simulate one step
+                a_env = actor_ema(s_env)
+                a_dist = OneHotCategorical(logits=a_env)
+                a_env_sample = a_dist.sample()
+
+                s_env_new, r_env, done_env, _ = env.step(a_env_sample.argmax().item())
+                s_env_new = torch.tensor(s_env_new, dtype=torch.float32).unsqueeze(0)
+                s_env_new = norms(s_env_new)
+
+                # # Get replay queue values
+                # a = actor_ema(s)
+                # a_dist = OneHotCategorical(logits=a)
+                # a_sample = a_dist.sample()
+
+                # update critic
+                target = r + gamma * q( # TODO TEST q_ema here? like q target?
+                    s_new,
+                    # argmax_logits2onehot(actor_ema(s_new))
+                    OneHotCategorical(logits=actor_ema(s_new)).sample()
+                ) * (1 - done)
+            loss_q = 1/2 * (target - q(s, a)) ** 2
+            loss_q.mean().backward()
+            optim_q.step()
+            optim_q.zero_grad()
+
+            # update replay
+            replay.update_priorities(idx, loss_q)
+            replay.push((s_env, a_env_sample, r_env, s_env_new, done_env), 1)
+            s_env = s_env_new
+            if done_env:
+                s_env = env.reset()
+                s_env = torch.tensor(s_env, dtype=torch.float32).unsqueeze(0)
+                s_env = norms(s_env)
+            steps += 1
+
+            # update actor
+            a = actor(s)
+            a_dist = OneHotCategorical(logits=a)
+            a_sample = a_dist.sample()
+            with torch.no_grad():
+                a_ema = actor_ema(s)
+                a_ema_dist = OneHotCategorical(logits=a_ema)
+                aa = target - q(s, a_sample)
+                actor_ema.load_state_dict(actor.state_dict())
+                # # update actor_ema with exponential moving average
+                # for param, ema_param in zip(actor.parameters(), actor_ema.parameters()):
+                #     ema_param.data = param.data * (1 - eps_ema) + ema_param.data * eps_ema
+            r = torch.exp(a_dist.log_prob(a_sample) - a_ema_dist.log_prob(a_sample))
+            loss_actor = torch.min(r * aa, torch.clip(r, 0.9, 1.1) * aa).mean()
+            # loss_actor = -(a_dist.log_prob(a_sample) * (target - q_ema(s, a_sample).detach())).mean()
+            loss_actor_entropy = -max(0.001, 1 * (num_steps - steps*2) / num_steps) * a_dist.entropy().mean()
+            (loss_actor + loss_actor_entropy).backward()
+
+            # # update actor_ema with exponential moving average
+            # for param, ema_param in zip(actor.parameters(), actor_ema.parameters()):
+            #     ema_param.data = param.data * (1 - eps_ema) + ema_param.data * eps_ema
+
+            optim_actor.step()
+            optim_actor.zero_grad()
+            optim_q.zero_grad()
+            optim_q_ema.zero_grad()
+
+            if steps % eval_interval == 0:
+                #eval
+                with torch.no_grad():
+                    cum_r_eval = 0
+                    s_eval = env_eval.reset()
+                    s_eval = torch.tensor(s_eval, dtype=torch.float32).unsqueeze(0)
+                    s_eval = norms(s_eval)
+                    done_eval = False
+                    while not done_eval:
+                        a_eval = actor_ema(s_eval)
+                        a_sample_eval = argmax_logits2onehot(a_eval)
+                        s_eval_new, r_eval, done_eval, _ = env_eval.step(a_sample_eval.argmax().item())
+                        s_eval_new = torch.tensor(s_eval_new, dtype=torch.float32).unsqueeze(0)
+                        s_eval_new = norms(s_eval_new)
+                        cum_r_eval += r_eval
+                        s_eval = s_eval_new
+
+                    pbar.set_postfix(
+                        cum_r_eval=cum_r_eval,
+                        loss_q=loss_q.mean().item(),
+                        loss_actor=loss_actor.item(),
+                        loss_actor_entropy=loss_actor_entropy.item(),
+                    )
+                    cum_r_eval_list_ema.append(cum_r_eval)
+            
+            pbar.update(1)
+            if steps >= num_steps:
+                break
+
+    return cum_r_eval_list_ema
+
+
 if __name__ == '__main__':
     batch_size = 64
     gamma = 0.95
@@ -306,6 +497,14 @@ if __name__ == '__main__':
 
     eval_list = []
 
+    # result_ema = [sim_ppo(
+    #     gamma=gamma,
+    #     num_steps=num_steps,
+    #     eval_interval=eval_interval,
+    #     ema_recall_interval=ema_recall_interval,
+    #     lr=lr,
+    #     env_name=env_name,
+    # )]
     # sim_ema(
     #     gamma,
     #     num_steps,
@@ -314,21 +513,33 @@ if __name__ == '__main__':
     #     lr,
     #     env_name
     # )
-    with mp.Pool(min(mp.cpu_count(), num_experiments)) as p:
-        result_ema = p.starmap(sim_ema, [(
-            gamma,
-            num_steps,
-            eval_interval,
-            ema_recall_interval,
-            lr,
-            env_name
-        )]*num_experiments)
+    # with mp.Pool(min(mp.cpu_count(), num_experiments)) as p:
+    #     result_ema = p.starmap(sim_ppo, [(
+    #         gamma,
+    #         num_steps,
+    #         eval_interval,
+    #         ema_recall_interval,
+    #         lr,
+    #         env_name
+    #     )]*num_experiments)
+    result_ema = []
+    for i in tqdm(range(num_experiments)):
+        result_ema.append(
+            sim_ppo(
+                gamma=gamma,
+                num_steps=num_steps,
+                eval_interval=eval_interval,
+                ema_recall_interval=ema_recall_interval,
+                lr=lr,
+                env_name=env_name,
+            )
+        )
     result_ema = np.array(result_ema)
     ema_mean = np.mean(result_ema, axis=0)
     ema_std = np.std(result_ema, axis=0)
 
     tensorboard_writer = tensorboard.SummaryWriter(
-        comment=f'eps_{eps_ema}_recall_{ema_recall_interval}_lr_{lr}_env_{env_name}'
+        comment=f'PPOeps_{eps_ema}_recall_{ema_recall_interval}_lr_{lr}_env_{env_name}'
     )
     for i in range(len(ema_mean)):
         tensorboard_writer.add_scalar('mean', ema_mean[i], i)
