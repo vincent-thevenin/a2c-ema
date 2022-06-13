@@ -59,9 +59,9 @@ def sim_ema(
     optim_q_ema = torch.optim.SGD(q_ema.parameters(), lr=lr)
 
     replay = ReplayQueue(
-        capacity
+        capacity,
+        use_prioritized_replay,
     )
-    ds = ModelDataset(replay)
     # preheat data
     with torch.no_grad():
         s = env.reset()
@@ -86,13 +86,14 @@ def sim_ema(
                 s = env.reset()
                 s = torch.tensor(s, dtype=torch.float32).unsqueeze(0)
                 s = norms(s)
+    ds = ModelDataset(replay)
     dl = torch.utils.data.DataLoader(
         ds,
         batch_size=batch_size,
         shuffle=True,
         num_workers=0,
         pin_memory=False,
-        drop_last=True
+        drop_last=False
     )
 
     s_env = env.reset()
@@ -289,7 +290,8 @@ if __name__ == '__main__':
     env_name = 'CartPole-v1' #'Acrobot-v1'
     num_experiments = 50
     filter_n = 10
-    capacity = 1_000
+    capacity = batch_size
+    use_prioritized_replay = False
 
     print(
         f'batch_size: {batch_size}, gamma: {gamma}, eps_ema: {eps_ema}, num_steps: {num_steps}, eval_interval: {eval_interval}, ema_recall_interval: {ema_recall_interval}, lr: {lr}, env_name: {env_name}, num_experiments: {num_experiments}, filter_n: {filter_n}, capacity: {capacity}'
