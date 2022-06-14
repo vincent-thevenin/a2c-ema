@@ -12,7 +12,7 @@ from torch.distributions.one_hot_categorical import OneHotCategorical
 from torch.utils import tensorboard
 from tqdm import tqdm
 
-from dataset import ReplayQueue, ModelDataset
+from dataset import ReplayQueue, ModelDataset, CustomDataLoader
 from model import Actor, Q
 
 
@@ -88,14 +88,15 @@ def sim_ema(
                 s = torch.tensor(s, dtype=torch.float32).unsqueeze(0)
                 s = norms(s)
     ds = ModelDataset(replay)
-    dl = torch.utils.data.DataLoader(
-        ds,
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=0,
-        pin_memory=False,
-        drop_last=False
-    )
+    # dl = torch.utils.data.DataLoader(
+    #     ds,
+    #     batch_size=batch_size,
+    #     shuffle=True,
+    #     num_workers=0,
+    #     pin_memory=False,
+    #     drop_last=False
+    # )
+    dl = CustomDataLoader(ds, batch_size=batch_size, shuffle=True)
 
     s_env = env.reset()
     s_env = torch.tensor(s_env, dtype=torch.float32).unsqueeze(0)
@@ -316,6 +317,7 @@ def sim_ppo(
 
     # env.close()
 
+    print("start")
     env = gym.make(env_name)
     env_eval = gym.make(env_name)
     norms = Norms(env_name)
@@ -362,13 +364,18 @@ def sim_ppo(
                 s = torch.tensor(s, dtype=torch.float32).unsqueeze(0)
                 s = norms(s)
     ds = ModelDataset(replay)
-    dl = torch.utils.data.DataLoader(
+    # dl = torch.utils.data.DataLoader(
+    #     ds,
+    #     batch_size=batch_size,
+    #     shuffle=True,
+    #     num_workers=0,
+    #     pin_memory=False,
+    #     drop_last=False
+    # )
+    dl = CustomDataLoader(
         ds,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=0,
-        pin_memory=False,
-        drop_last=False
     )
 
     s_env = env.reset()
