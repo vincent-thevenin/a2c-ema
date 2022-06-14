@@ -427,15 +427,16 @@ def sim_ppo(
             a = actor(s)
             a_dist = OneHotCategorical(logits=a)
             a_sample = a_dist.sample()
+            a_prob = torch.nn.functional.softmax(a, dim=-1)[:, :, a_sample.argmax().item()]
             with torch.no_grad():
                 a_ema = actor_ema(s)
-                a_ema_dist = OneHotCategorical(logits=a_ema)
+                a_ema_prob = torch.nn.functional.softmax(a_ema, dim=-1)[:, :, a_sample.argmax().item()]
                 aa = target - q(s, a_sample)
-                actor_ema.load_state_dict(actor.state_dict())
-                # # update actor_ema with exponential moving average
-                # for param, ema_param in zip(actor.parameters(), actor_ema.parameters()):
-                #     ema_param.data = param.data * (1 - eps_ema) + ema_param.data * eps_ema
-            r = torch.exp(a_dist.log_prob(a_sample) - a_ema_dist.log_prob(a_sample))
+                # actor_ema.load_state_dict(actor.state_dict())
+                # update actor_ema with exponential moving average
+                for param, ema_param in zip(actor.parameters(), actor_ema.parameters()):
+                    ema_param.data = param.data * (1 - eps_ema) + ema_param.data * eps_ema
+            r = a_prob / a_ema_prob
             loss_actor = torch.min(r * aa, torch.clip(r, 0.9, 1.1) * aa).mean()
             # loss_actor = -(a_dist.log_prob(a_sample) * (target - q_ema(s, a_sample).detach())).mean()
             loss_actor_entropy = -max(0.001, 1 * (num_steps - steps*2) / num_steps) * a_dist.entropy().mean()
@@ -520,27 +521,31 @@ if __name__ == '__main__':
     #     lr,
     #     env_name
     # )
-    # with mp.Pool(min(mp.cpu_count(), num_experiments)) as p:
-    #     result_ema = p.starmap(sim_ppo, [(
-    #         gamma,
-    #         num_steps,
-    #         eval_interval,
-    #         ema_recall_interval,
-    #         lr,
-    #         env_name
-    #     )]*num_experiments)
-    result_ema = []
-    for i in tqdm(range(num_experiments)):
-        result_ema.append(
-            sim_ppo(
-                gamma=gamma,
-                num_steps=num_steps,
-                eval_interval=eval_interval,
-                ema_recall_interval=ema_recall_interval,
-                lr=lr,
-                env_name=env_name,
-            )
+    with mp.Pool(min(mp.cpu_count(), num_experiments)) as p:
+        result_ema = p.starmap(
+            sim_ppo,
+            [(
+                gamma,
+                num_steps,
+                eval_interval,
+                ema_recall_interval,
+                lr,
+                env_name
+            )] * num_experiments,
+            chunksize=1
         )
+    # result_ema = []
+    # for i in tqdm(range(num_experiments)):
+    #     result_ema.append(
+    #         sim_ppo(
+    #             gamma=gamma,
+    #             num_steps=num_steps,
+    #             eval_interval=eval_interval,
+    #             ema_recall_interval=ema_recall_interval,
+    #             lr=lr,
+    #             env_name=env_name,
+    #         )
+    #     )
     result_ema = np.array(result_ema)
     ema_mean = np.mean(result_ema, axis=0)
     ema_std = np.std(result_ema, axis=0)
