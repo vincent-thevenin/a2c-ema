@@ -70,3 +70,43 @@ class ModelDataset(Dataset):
         is_terminal = torch.Tensor([float(is_terminal)])
 
         return state, action, reward.unsqueeze(1), next_state, is_terminal.unsqueeze(1), idx
+
+class CustomDataLoader():
+    def __init__(self, dataset, batch_size, shuffle=True):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+
+    def __iter__(self):
+        self.idx = 0
+        if self.shuffle:
+            self.shuffled_idxs = np.random.permutation(len(self.dataset))
+        return self
+
+    def __next__(self):
+        if self.idx * self.batch_size >= len(self.dataset):
+            self.__iter__()
+            raise StopIteration
+        else:
+            if self.shuffle:
+                idxs = self.shuffled_idxs[self.idx * self.batch_size:(self.idx + 1) * self.batch_size]
+            else:
+                idxs = self.idx * self.batch_size + np.arange(min(self.batch_size, len(self.dataset) - self.idx * self.batch_size))
+            self.idx += 1
+
+            # make batches
+            # state, action, reward, next_state, is_terminal, idx
+            r = []
+            for idx in idxs:
+                for i, rr in enumerate(self.dataset[idx]):
+                    if len(r) <= i:
+                        r.append([])
+                    # check and convert tensor type
+                    if not isinstance(rr, torch.Tensor):
+                        rr = torch.tensor(rr)
+                    r[i].append(rr)
+            return tuple(torch.stack(rr) for rr in r)
+            
+
+    def __len__(self):
+        return len(self.dataset) // self.batch_size + min(1, len(self.dataset) % self.batch_size)
